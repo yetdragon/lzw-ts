@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: check
+        name: Check LZW compression/decompression
+        entry: deno test
+        language: system
+        files: mod(.\test)?\.ts$
+        pass_filenames: false

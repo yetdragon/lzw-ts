@@ -1,0 +1,15 @@
+{
+	"name": "@yetdragon/lzw",
+	"version": "1.0.0",
+	"exports": "./src/mod.ts",
+	"imports": {
+		"@std/assert": "jsr:@std/assert"
+	},
+	"publish": {
+		"include": [
+			"src/mod.ts",
+			"LICENSE.txt",
+			"README.md"
+		]
+	}
+}
