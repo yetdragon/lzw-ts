@@ -9,6 +9,9 @@
 const CLEAR_CODE = 256
 const EOI_CODE = 257
 
+/**
+ * Error thrown when LZW decompression fails
+ */
 export class LzwError extends Error {
 	constructor(message: string) {
 		super(message)
@@ -18,44 +21,30 @@ export class LzwError extends Error {
 
 // ---------- Compression ----------- //
 class CompressionTable {
-	// deno-lint-ignore no-explicit-any
-	private root: Map<number, any>
+	private table: Map<string, number>
 
 	constructor() {
-		this.root = new Map()
+		this.table = new Map()
+
 	}
 
-	set(key: number[], value: number): void {
-		let currentMap = this.root
-		for (const part of key) {
-			if (!currentMap.has(part)) {
-				// deno-lint-ignore no-explicit-any
-				currentMap.set(part, new Map<number, any>())
-			}
-			currentMap = currentMap.get(part)!
+	public reset() {
+		this.table.clear()
+		for (let i = 0; i < 256; i++) {
+			this.table.set(String.fromCharCode(i), i)
 		}
-
-		currentMap.set(-1, value)
 	}
 
-	get(key: number[]): number | undefined {
-		let currentMap = this.root
-		for (const part of key) {
-			if (!currentMap.has(part)) {
-				return undefined
-			}
-			currentMap = currentMap.get(part)!
-		}
-
-		return currentMap.get(-1)
+	public set(key: number[], value: number): void {
+		this.table.set(String.fromCharCode(...key), value)
 	}
 
-	has(key: number[]): boolean {
+	public get(key: number[]): number | undefined {
+		return this.table.get(String.fromCharCode(...key))
+	}
+
+	public has(key: number[]): boolean {
 		return this.get(key) !== undefined
-	}
-
-	clear(): void {
-		this.root.clear()
 	}
 }
 
@@ -66,8 +55,10 @@ class BitStreamWriter {
 
 	public write(value: number, bitCount: number): void {
 		while (bitCount > 0) {
-			const bitsToWrite = Math.min(bitCount, 8 - this.bitsFilled)
+			const availableBits = 8 - this.bitsFilled
+			const bitsToWrite = Math.min(bitCount, availableBits)
 			const bits = (value >> (bitCount - bitsToWrite)) & ((1 << bitsToWrite) - 1)
+
 			this.currentByte = (this.currentByte << bitsToWrite) | bits
 			this.bitsFilled += bitsToWrite
 			bitCount -= bitsToWrite
@@ -81,7 +72,6 @@ class BitStreamWriter {
 	}
 
 	public toData(): Uint8Array {
-		// Pad with zeros if necessary
 		this.write(0, 8 - this.bitsFilled)
 		return new Uint8Array(this.buffer)
 	}
@@ -117,26 +107,18 @@ class BitStreamWriter {
  * const compressed2 = compress(input, maxBits)
  */
 export function compress(data: Uint8Array, maxBits: number = 12): Uint8Array {
+	// Early exit for empty input; return CLEAR_CODE + EOI_CODE
+	if (data.length === 0) {
+		return new Uint8Array([0x80, 0x40, 0x40])
+	}
+
 	const table = new CompressionTable()
 	const bitWriter = new BitStreamWriter()
-	let codeSize = 9 // Initial code size
+	let codeSize = 9
 	let nextCode = 258 // 0-255: single bytes, 256: ClearCode, 257: EOI
 
-	const initializeStringTable = () => {
-		table.clear()
-		for (let i = 0; i < 256; i += 1) {
-			table.set([i], i)
-		}
-	}
-
-	initializeStringTable()
+	table.reset()
 	bitWriter.write(CLEAR_CODE, codeSize)
-
-	// Early exit for empty input
-	if (data.length === 0) {
-		bitWriter.write(EOI_CODE, codeSize)
-		return bitWriter.toData()
-	}
 
 	let omega: number[] = []
 
@@ -155,7 +137,7 @@ export function compress(data: Uint8Array, maxBits: number = 12): Uint8Array {
 				}
 			} else {
 				bitWriter.write(CLEAR_CODE, codeSize)
-				initializeStringTable()
+				table.reset()
 				codeSize = 9
 				nextCode = 258
 			}
@@ -176,31 +158,24 @@ class BitStreamReader {
 	private bitsInBuffer = 0
 	private byteIndex = 0
 
-	constructor(private data: Uint8Array) {}
+	constructor(
+		private data: Uint8Array
+	) {}
 
 	public read(bitCount: number): number | null {
-		// Validate input
-		if (bitCount <= 0 || bitCount > 32) {
-			throw new Error(`Invalid bit count: ${bitCount}`)
-		}
+		while (this.bitsInBuffer < bitCount) {
+			if (this.byteIndex >= this.data.length) {
+				return null
+			}
 
-		// Load bytes until we have enough bits
-		while (this.bitsInBuffer < bitCount && this.byteIndex < this.data.length) {
-			// Shift existing bits left by 8
 			this.bitBuffer = (this.bitBuffer << 8) | this.data[this.byteIndex++]
 			this.bitsInBuffer += 8
 		}
 
-		// If we don't have enough bits, return null
-		if (this.bitsInBuffer < bitCount) {
-			return null
-		}
-
-		// Extract the desired bits
+		const shift = this.bitsInBuffer - bitCount
 		const mask = (1 << bitCount) - 1
-		const result = (this.bitBuffer >> (this.bitsInBuffer - bitCount)) & mask
+		const result = (this.bitBuffer >>> shift) & mask
 
-		// Remove the read bits from buffer
 		this.bitsInBuffer -= bitCount
 		this.bitBuffer &= (1 << this.bitsInBuffer) - 1
 
@@ -262,8 +237,7 @@ export function decompress(data: Uint8Array, maxBits: number = 12): Uint8Array {
 
 	const addStringToTable = (sequence: number[]): void => {
 		if (nextCode < 1 << maxBits) {
-			table.set(nextCode, sequence)
-			nextCode += 1
+			table.set(nextCode++, sequence)
 			if (nextCode === (1 << codeSize) - 1 && codeSize < maxBits) {
 				codeSize += 1
 			}
@@ -273,8 +247,6 @@ export function decompress(data: Uint8Array, maxBits: number = 12): Uint8Array {
 			nextCode = 258
 		}
 	}
-
-	initializeTable()
 
 	let code = getNextCode()
 	if (code !== CLEAR_CODE) {
@@ -288,6 +260,7 @@ export function decompress(data: Uint8Array, maxBits: number = 12): Uint8Array {
 			initializeTable()
 			codeSize = 9
 			nextCode = 258
+
 			code = getNextCode()
 			if (code === EOI_CODE) break
 			output.push(...stringFromCode(code))
